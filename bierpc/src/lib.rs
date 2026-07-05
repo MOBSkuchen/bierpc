@@ -2,7 +2,10 @@ pub mod serialize;
 pub mod error;
 
 use std::marker::PhantomData;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use crate::error::RpcResult;
 use crate::serialize::{Deserialize, Serialize};
 
@@ -13,7 +16,7 @@ pub struct Target {
 }
 
 impl Target {
-    fn to_socket_addr(&self) -> SocketAddr {
+    pub fn to_socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.addr.parse().unwrap(), self.port)
     }
 
@@ -32,8 +35,8 @@ pub struct RpcClient<A: Serialize> {
 }
 
 impl<A: Serialize> RpcClient<A> {
-    pub fn new(connection_target: Target) -> RpcResult<Self> {
-        let connection = TcpStream::connect(connection_target.to_socket_addr())?;
+    pub async fn new(connection_target: Target) -> RpcResult<Self> {
+        let connection = TcpStream::connect(connection_target.to_socket_addr()).await?;
         Ok(Self {
             connection_target,
             connection,
@@ -41,29 +44,37 @@ impl<A: Serialize> RpcClient<A> {
         })
     }
 
-    pub fn call<R: Deserialize>(&mut self, action: A) -> RpcResult<R> {
-        action.serialize(&mut self.connection)?;
-        Ok(R::deserialize(&mut self.connection)?)
+    pub async fn call<R: Deserialize>(&mut self, action: A) -> RpcResult<R> {
+        action.serialize(&mut self.connection).await?;
+        use tokio::io::AsyncWriteExt;
+        self.connection.flush().await?;
+
+        Ok(R::deserialize(&mut self.connection).await?)
     }
 }
 
-pub trait RpcServerHandler<A: Deserialize, R: Serialize> {
-    fn handle(&self, action: A) -> RpcResult<R>;
+pub trait RpcServerHandler<A: Deserialize, R: Serialize>: Send + Sync + 'static {
+    fn handle(&self, action: A) -> impl Future<Output = RpcResult<R>> + Send;
 }
 
 pub struct RpcServer<A: Deserialize, R: Serialize, Psh: RpcServerHandler<A, R>> {
-    handler: Psh,
+    handler: Arc<Psh>,
     pub target: Target,
     listener: TcpListener,
     _phantom1: PhantomData<A>,
     _phantom2: PhantomData<R>,
 }
 
-impl<A: Deserialize + Sync + std::fmt::Debug, R: Serialize + Sync + std::fmt::Debug, Psh: RpcServerHandler<A, R> + Sync> RpcServer<A, R, Psh> {
-    pub fn new(target: Target, handler: Psh) -> RpcResult<Self> {
-        let listener = TcpListener::bind(target.to_socket_addr())?;
+impl<
+    A: Deserialize + Send + Sync + std::fmt::Debug + 'static,
+    R: Serialize + Send + Sync + std::fmt::Debug + 'static,
+    Psh: RpcServerHandler<A, R>
+> RpcServer<A, R, Psh> {
+
+    pub async fn new(target: Target, handler: Psh) -> RpcResult<Self> {
+        let listener = TcpListener::bind(target.to_socket_addr()).await?;
         Ok(Self {
-            handler,
+            handler: Arc::new(handler),
             target,
             listener,
             _phantom1: PhantomData,
@@ -71,54 +82,60 @@ impl<A: Deserialize + Sync + std::fmt::Debug, R: Serialize + Sync + std::fmt::De
         })
     }
 
-    fn incoming_handle(&self, mut s: TcpStream) {
-        let res: RpcResult<()> = (|| {
-            let action = A::deserialize(&mut s)?;
-            let res = self.handler.handle(action)?;
-            res.serialize(&mut s)?;
+    async fn incoming_handle(handler: Arc<Psh>, mut s: TcpStream) {
+        let res: RpcResult<()> = async {
+            let action = A::deserialize(&mut s).await?;
+            let res = handler.handle(action).await?;
+            res.serialize(&mut s).await?;
+
+            use tokio::io::AsyncWriteExt;
+            s.flush().await?;
             Ok(())
-        })();
+        }.await;
+
         if let Err(e) = res {
-            e.serialize(s).expect("Damn");
+            eprintln!("RPC Error: {:?}", e);
         }
     }
 
-    pub fn run(&self, max_cons: u64) {
-        let pool_size = if max_cons == 0 { 1 } else { max_cons as usize };
+    pub async fn run(&self, max_cons: u64) {
+        /*
+            If max_cons > 0, we use a Semaphore to limit concurrency.
+            If 0, we assume unbounded (or strictly 1 if mimicking original logic literally,
+            but unbounded is usually preferred for 0 in async contexts.
+            Here we'll treat 0 as "no limit").
+        */
+        let semaphore = if max_cons > 0 {
+            Some(Arc::new(Semaphore::new(max_cons as usize)))
+        } else {
+            None
+        };
 
-        std::thread::scope(|scope| {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<TcpStream>(0);
-
-            let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
-
-            for _ in 0..pool_size {
-                let rx = rx.clone();
-                scope.spawn(move || {
-                    loop {
-                        let stream = {
-                            let lock = rx.lock().unwrap();
-                            match lock.recv() {
-                                Ok(s) => s,
-                                Err(_) => break, // Channel closed, shut down worker
-                            }
-                        };
-
-                        self.incoming_handle(stream);
-                    }
-                });
-            }
-
-            for stream in self.listener.incoming() {
-                match stream {
-                    Ok(s) => {
-                        if let Err(e) = tx.send(s) {
-                            eprintln!("Failed to send stream to worker (server shutting down?): {}", e);
-                            break;
-                        }
-                    }
-                    Err(e) => eprintln!("Connection failed: {}", e),
+        loop {
+            // Accept new connection
+            let (stream, _) = match self.listener.accept().await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Connection failed: {}", e);
+                    continue;
                 }
-            }
-        });
+            };
+
+            let handler = self.handler.clone();
+            let sem_clone = semaphore.clone();
+
+            tokio::spawn(async move {
+                let _permit = if let Some(sem) = sem_clone {
+                    match sem.acquire_owned().await {
+                        Ok(p) => Some(p),
+                        Err(_) => return, // Semaphore closed
+                    }
+                } else {
+                    None
+                };
+
+                Self::incoming_handle(handler, stream).await;
+            });
+        }
     }
 }

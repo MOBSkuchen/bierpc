@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use bierpc::serialize::Serialize;
-use bierpc::serialize::Deserialize;
-use std::thread;
+use tokio::time::{sleep, Duration};
+use bierpc::serialize::{Serialize, Deserialize};
 use bierpc::{RpcClient, RpcServer, RpcServerHandler, Target};
 use bierpc::error::RpcResult;
 use bier_derive::{Serialize, Deserialize};
@@ -13,8 +12,7 @@ enum Action {
     DeleteUser(u64)
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 enum Return {
     CreateUserSuccess(u64),
     DeleteUserSuccess(u64)
@@ -45,39 +43,46 @@ impl MyHandler {
 }
 
 impl RpcServerHandler<Action, MyDummyResult> for MyHandler {
-    fn handle(&self, action: Action) -> RpcResult<MyDummyResult> {
+    async fn handle(&self, action: Action) -> RpcResult<MyDummyResult> {
         match action {
-            Action::CreateUser(id, name) => {self.create_user(id, name)}
-            Action::DeleteUser(id) => {self.delete_user(id)}
+            Action::CreateUser(id, name) => self.create_user(id, name),
+            Action::DeleteUser(id) => self.delete_user(id)
         }
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let port = 8080;
     let target = Target::new("127.0.0.1".to_string(), port);
 
     let server_target = target.clone();
-    thread::spawn(move || {
+
+    // Spawn the server as a Tokio background task
+    tokio::spawn(async move {
         let handler = MyHandler::new();
         let server = RpcServer::<Action, MyDummyResult, _>::new(server_target, handler)
-            .expect("Failed to start server");
-        server.run(4);
+            .await
+            .expect("Failed to bind server");
+
+        // run() is now async and infinite
+        server.run(4).await;
     });
 
-    thread::sleep(std::time::Duration::from_millis(100));
+    sleep(Duration::from_millis(100)).await;
 
     println!("[Client] Connecting...");
     let mut client = RpcClient::<Action>::new(target)
+        .await
         .expect("Failed to create client");
 
     let input = Action::DeleteUser(10);
     println!("[Client] Sending: \"{:?}\"", input);
 
-    match client.call::<MyDummyResult>(input) {
+    match client.call::<MyDummyResult>(input).await {
         Ok(response) => {
             println!("[Client] Received: \"{:?}\"", response);
-            println!("[Test] SUCCESS: String was reversed correctly.");
+            println!("[Test] SUCCESS");
         },
         Err(e) => {
             println!("[Test] FAILED: {:?}", e);

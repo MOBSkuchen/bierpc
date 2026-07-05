@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 bier_derive = {path = "../bier_derive" }
 bierpc = {path = "../bierpc" }
+tokio = {version = "1.49.0", features = ["full"]}
