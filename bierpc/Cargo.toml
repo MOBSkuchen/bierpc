@@ -3,6 +3,10 @@ name = "bierpc"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["generic_array_parse"]
+generic_array_parse = []
+
 [dependencies]
 bier_derive = {path = "../bier_derive" }
 tokio = { version =  "1.49.0", features = ["full"] }

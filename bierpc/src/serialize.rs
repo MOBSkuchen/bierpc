@@ -1,9 +1,13 @@
-use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+#[cfg(feature = "generic_array_parse")]
+use std::mem;
+#[cfg(feature = "generic_array_parse")]
+use std::mem::MaybeUninit;
 
 pub trait Serialize {
     fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> impl Future<Output = io::Result<usize>> + Send;
@@ -191,5 +195,40 @@ impl Deserialize for SocketAddr {
             IpAddr::V6(Ipv6Addr::from_bits(u128::deserialize(&mut r).await?))
         };
         Ok(SocketAddr::new(ip, port))
+    }
+}
+
+#[cfg(feature = "generic_array_parse")]
+impl<T, const L: usize> Serialize for [T; L]
+where T: Serialize + Sync
+{
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut t = (L as u64).serialize(&mut w).await?;
+        for i in self {
+            t += i.serialize(&mut w).await?;
+        }
+        Ok(t)
+    }
+}
+
+#[cfg(feature = "generic_array_parse")]
+impl<T, const L: usize> Deserialize for [T; L]
+where T: Deserialize + Sync + Sized + Send
+{
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let len = u64::deserialize(&mut r).await? as usize;
+        if len != L {
+            return Err(io::Error::new(ErrorKind::InvalidData, "Reported size is not expected size"))
+        }
+        let mut data: [MaybeUninit<T>; L] = [const { MaybeUninit::uninit() }; L];
+        for i in 0..len {
+            let d = T::deserialize(&mut r).await?;
+            data[i].write(d);
+        }
+        unsafe {
+            let fully_initialized_array = mem::transmute_copy(&data);
+            mem::forget(data);
+            Ok(fully_initialized_array)
+        }
     }
 }

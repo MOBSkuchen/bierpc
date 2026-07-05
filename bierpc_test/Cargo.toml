@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 bier_derive = {path = "../bier_derive" }
-bierpc = {path = "../bierpc" }
+bierpc = {path = "../bierpc", features = ["generic_array_parse"] }
 tokio = {version = "1.49.0", features = ["full"]}
