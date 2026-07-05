@@ -144,3 +144,47 @@ impl<T: Deserialize + std::fmt::Debug, E: Deserialize + std::fmt::Debug> Deseria
         }
     }
 }
+
+
+impl Serialize for PathBuf {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let s = self.as_os_str().to_str().ok_or(io::Error::new(ErrorKind::InvalidData, "Could not convert path to UTF-8"))?.to_string();
+        s.serialize(&mut w).await
+    }
+}
+
+impl Deserialize for PathBuf {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let s = String::deserialize(&mut r).await?;
+        PathBuf::from_str(s.as_str()).map_err(|e| {io::Error::new(ErrorKind::InvalidData, "Could not convert bare string to PathBuf")})
+    }
+}
+
+impl Serialize for SocketAddr {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut t = self.is_ipv4().serialize(&mut w).await?;
+        t += self.port().serialize(&mut w).await?;
+        t += match self.ip() {
+            IpAddr::V4(ip) => {
+                ip.to_bits().serialize(&mut w).await?
+            }
+            IpAddr::V6(ip) => {
+                ip.to_bits().serialize(&mut w).await?
+            }
+        };
+        Ok(t)
+    }
+}
+
+impl Deserialize for SocketAddr {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let is_ipv4 = bool::deserialize(&mut r).await?;
+        let port = u16::deserialize(&mut r).await?;
+        let ip = if is_ipv4 {
+            IpAddr::V4(Ipv4Addr::from_bits(u32::deserialize(&mut r).await?))
+        } else {
+            IpAddr::V6(Ipv6Addr::from_bits(u128::deserialize(&mut r).await?))
+        };
+        Ok(SocketAddr::new(ip, port))
+    }
+}
