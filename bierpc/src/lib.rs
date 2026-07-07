@@ -2,7 +2,7 @@ pub mod serialize;
 pub mod error;
 
 use std::marker::PhantomData;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -28,15 +28,21 @@ impl Target {
     }
 }
 
+impl Into<SocketAddr> for Target {
+    fn into(self) -> SocketAddr {
+        self.to_socket_addr()
+    }
+}
+
 pub struct RpcClient<A: Serialize> {
-    pub connection_target: Target,
+    pub connection_target: SocketAddr,
     connection: TcpStream,
     _phantom1: PhantomData<A>
 }
 
 impl<A: Serialize> RpcClient<A> {
-    pub async fn new(connection_target: Target) -> RpcResult<Self> {
-        let connection = TcpStream::connect(connection_target.to_socket_addr()).await?;
+    pub async fn new(connection_target: SocketAddr) -> RpcResult<Self> {
+        let connection = TcpStream::connect(connection_target).await?;
         Ok(Self {
             connection_target,
             connection,
@@ -59,7 +65,7 @@ pub trait RpcServerHandler<A: Deserialize, R: Serialize>: Send + Sync + 'static 
 
 pub struct RpcServer<A: Deserialize, R: Serialize, Psh: RpcServerHandler<A, R>> {
     handler: Arc<Psh>,
-    pub target: Target,
+    pub target: SocketAddr,
     listener: TcpListener,
     _phantom1: PhantomData<A>,
     _phantom2: PhantomData<R>,
@@ -71,8 +77,8 @@ impl<
     Psh: RpcServerHandler<A, R>
 > RpcServer<A, R, Psh> {
 
-    pub async fn new(target: Target, handler: Psh) -> RpcResult<Self> {
-        let listener = TcpListener::bind(target.to_socket_addr()).await?;
+    pub async fn new(target: SocketAddr, handler: Psh) -> RpcResult<Self> {
+        let listener = TcpListener::bind(target).await?;
         Ok(Self {
             handler: Arc::new(handler),
             target,

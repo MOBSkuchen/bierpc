@@ -26,7 +26,6 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
                 match &variant.fields {
                     Fields::Unit => quote! {
                         Self::#variant_ident => {
-                            // Added .await
                             #tag.serialize(&mut w).await?;
                             Ok(1)
                         }
@@ -38,9 +37,7 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
                         let field_indices_copy = field_indices.clone();
                         quote! {
                             Self::#variant_ident(#(#field_indices),*) => {
-                                // Added .await
                                 let mut total = #tag.serialize(&mut w).await?;
-                                // Added .await
                                 #( total += #field_indices_copy.serialize(&mut w).await?; )*
                                 Ok(total)
                             }
@@ -51,9 +48,7 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
                         let field_names_copy = field_names.clone();
                         quote! {
                             Self::#variant_ident { #(#field_names),* } => {
-                                // Added .await
                                 let mut total = #tag.serialize(&mut w).await?;
-                                // Added .await
                                 #( total += #field_names_copy.serialize(&mut w).await?; )*
                                 Ok(total)
                             }
@@ -107,12 +102,27 @@ pub fn derive_deserialize(input: TokenStream) -> TokenStream {
                         let field_types = fields.unnamed.iter().map(|f| &f.ty);
                         quote! {
                             #index => Ok(Self::#variant_ident(
-                                // Added .await
                                 #( <#field_types>::deserialize(&mut r).await? ),*
                             )),
                         }
                     }
-                    _ => unimplemented!("Named fields in enums not supported in this example"),
+                    Fields::Named(fields) => {
+                        let mut v = vec![];
+                        for field in fields.named.iter() {
+                            let ty = field.ty.clone();
+                            let name = field.ident.clone().unwrap();
+                            v.push(
+                                quote!(
+                                    #name : #ty::deserialize(&mut r).await?
+                                )
+                            );
+                        }
+                        quote!(
+                            #index => Ok(Self::#variant_ident {
+                                #(#v),*
+                            }),
+                        )
+                    }
                 }
             });
 
