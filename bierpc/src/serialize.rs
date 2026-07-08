@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -40,6 +41,38 @@ macro_rules! impl_serialization {
 }
 
 impl_serialization!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64);
+
+macro_rules! impl_tuples {
+    ( $( $name:ident )+ ) => {
+        impl<$($name: Sync + Send + Serialize),+> Serialize for ($($name,)+) {
+            async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+                let ($($name,)+) = self;
+
+                let mut total_bytes = 0;
+
+                $(
+                    total_bytes += $name.serialize(&mut w).await?;
+                )+
+
+                Ok(total_bytes)
+            }
+        }
+
+        impl<$($name: Sync + Send + Deserialize),+> Deserialize for ($($name,)+) {
+            async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+                Ok((
+                    $(
+                        $name::deserialize(&mut r).await?,
+                    )+
+                ))
+            }
+        }
+    };
+}
+
+impl_tuples! { a }
+impl_tuples! { a b }
+impl_tuples! { a b c }
 
 impl Serialize for bool {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
@@ -111,8 +144,7 @@ impl<T: Deserialize> Deserialize for Option<T> {
 
 impl<T: Serialize + Sync> Serialize for Vec<T> {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
-        (self.len() as u64).serialize(&mut w).await?;
-        let mut total = 8;
+        let mut total = (self.len() as u64).serialize(&mut w).await?;
         for i in self {
             total += i.serialize(&mut w).await?;
         }
@@ -230,5 +262,27 @@ where T: Deserialize + Sync + Sized + Send
             mem::forget(data);
             Ok(fully_initialized_array)
         }
+    }
+}
+
+impl<K: Serialize + Sync, V: Serialize + Sync> Serialize for HashMap<K, V> {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut total = (self.len() as u64).serialize(&mut w).await?;
+        for (k, v) in self {
+            total += k.serialize(&mut w).await?;
+            total += v.serialize(&mut w).await?;
+        }
+        Ok(total)
+    }
+}
+
+impl<K: Deserialize + std::hash::Hash + std::cmp::Eq + Send, V: Deserialize + Send> Deserialize for HashMap<K, V> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let len = u64::deserialize(&mut r).await?;
+        let mut hashmap = HashMap::with_capacity(len as usize);
+        for _ in 0..len {
+            hashmap.insert(K::deserialize(&mut r).await?, V::deserialize(&mut r).await?);
+        }
+        Ok(hashmap)
     }
 }
