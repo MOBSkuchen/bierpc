@@ -2,6 +2,39 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in bytes {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn derive_verified(input: TokenStream, trait_name: &str) -> TokenStream {
+    let hash = fnv1a_64(input.to_string().as_bytes());
+    let trait_ident = quote::format_ident!("{}", trait_name);
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    TokenStream::from(quote! {
+        impl #impl_generics #trait_ident for #name #ty_generics #where_clause {
+            const TYPE_HASH: u64 = #hash;
+        }
+    })
+}
+
+#[proc_macro_derive(SerializeVerified)]
+pub fn derive_serialize_verified(input: TokenStream) -> TokenStream {
+    derive_verified(input, "SerializeVerified")
+}
+
+#[proc_macro_derive(DeserializeVerified)]
+pub fn derive_deserialize_verified(input: TokenStream) -> TokenStream {
+    derive_verified(input, "DeserializeVerified")
+}
+
 #[proc_macro_derive(Serialize)]
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

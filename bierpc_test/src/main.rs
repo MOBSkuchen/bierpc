@@ -1,19 +1,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
-use bierpc::serialize::{Serialize, Deserialize};
+use bierpc::serialize::{Serialize, Deserialize, SerializeVerified, DeserializeVerified};
 use bierpc::{RpcClient, RpcServer, RpcServerHandler, Target};
 use bierpc::error::RpcResult;
-use bier_derive::{Serialize, Deserialize};
+use bier_derive::{Serialize, Deserialize, SerializeVerified, DeserializeVerified};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, SerializeVerified, DeserializeVerified, Debug)]
 enum Action {
     CreateUser { id: u64, name: String },
     DeleteUser(u64),
     DeleteUser2([u8; 8])
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, SerializeVerified, DeserializeVerified, Debug)]
 enum Return {
     CreateUserSuccess(u64),
     DeleteUserSuccess(u64),
@@ -88,5 +88,24 @@ async fn main() {
         Err(e) => {
             println!("[Test] FAILED: {:?}", e);
         }
+    }
+
+    let (mut tx, mut rx) = tokio::io::duplex(1024);
+
+    let verified_input = Action::CreateUser { id: 2, name: "Verified".to_string() };
+    println!("[Verified] Sending: \"{:?}\"", verified_input);
+    verified_input.serialize_verified(&mut tx).await.expect("Failed to serialize");
+
+    match Action::deserialize_verified(&mut rx).await.expect("Failed to deserialize") {
+        Some(action) => println!("[Verified] Received: \"{:?}\"", action),
+        None => println!("[Verified] FAILED: unexpected hash mismatch"),
+    }
+
+    let verified_input = Action::DeleteUser(2);
+    verified_input.serialize_verified(&mut tx).await.expect("Failed to serialize");
+
+    match Return::deserialize_verified(&mut rx).await.expect("Failed to deserialize") {
+        Some(ret) => println!("[Verified] FAILED: expected hash mismatch, got \"{:?}\"", ret),
+        None => println!("[Verified] Hash mismatch detected as expected"),
     }
 }

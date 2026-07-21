@@ -18,6 +18,59 @@ pub trait Deserialize: Sized {
     fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> impl Future<Output = io::Result<Self>> + Send;
 }
 
+pub const fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
+pub const fn type_hash(name: &str) -> u64 {
+    fnv1a_64(name.as_bytes())
+}
+
+pub const fn combine_type_hashes(base: u64, other: u64) -> u64 {
+    let bytes = other.to_be_bytes();
+    let mut hash = base;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
+pub trait SerializeVerified: Serialize + Sync {
+    const TYPE_HASH: u64;
+
+    fn serialize_verified<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> impl Future<Output = io::Result<usize>> + Send {
+        async move {
+            let mut total = Self::TYPE_HASH.serialize(&mut w).await?;
+            total += self.serialize(&mut w).await?;
+            Ok(total)
+        }
+    }
+}
+
+pub trait DeserializeVerified: Deserialize {
+    const TYPE_HASH: u64;
+
+    fn deserialize_verified<R: AsyncRead + Unpin + Send>(mut r: R) -> impl Future<Output = io::Result<Option<Self>>> + Send {
+        async move {
+            let hash = u64::deserialize(&mut r).await?;
+            if hash != Self::TYPE_HASH {
+                return Ok(None);
+            }
+            Ok(Some(Self::deserialize(&mut r).await?))
+        }
+    }
+}
+
 macro_rules! impl_serialization {
     ($($t:ty),*) => {
         $(
@@ -41,6 +94,22 @@ macro_rules! impl_serialization {
 }
 
 impl_serialization!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64);
+
+macro_rules! impl_verified {
+    ($($t:ty),*) => {
+        $(
+            impl SerializeVerified for $t {
+                const TYPE_HASH: u64 = type_hash(stringify!($t));
+            }
+
+            impl DeserializeVerified for $t {
+                const TYPE_HASH: u64 = type_hash(stringify!($t));
+            }
+        )*
+    };
+}
+
+impl_verified!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool, String, PathBuf, SocketAddr);
 
 macro_rules! impl_tuples {
     ( $( $name:ident )+ ) => {
@@ -66,6 +135,22 @@ macro_rules! impl_tuples {
                     )+
                 ))
             }
+        }
+
+        impl<$($name: SerializeVerified + Send),+> SerializeVerified for ($($name,)+) {
+            const TYPE_HASH: u64 = {
+                let mut hash = type_hash("tuple");
+                $( hash = combine_type_hashes(hash, $name::TYPE_HASH); )+
+                hash
+            };
+        }
+
+        impl<$($name: DeserializeVerified + Sync + Send),+> DeserializeVerified for ($($name,)+) {
+            const TYPE_HASH: u64 = {
+                let mut hash = type_hash("tuple");
+                $( hash = combine_type_hashes(hash, $name::TYPE_HASH); )+
+                hash
+            };
         }
     };
 }
@@ -142,6 +227,14 @@ impl<T: Deserialize> Deserialize for Option<T> {
     }
 }
 
+impl<T: SerializeVerified> SerializeVerified for Option<T> {
+    const TYPE_HASH: u64 = combine_type_hashes(type_hash("Option"), T::TYPE_HASH);
+}
+
+impl<T: DeserializeVerified> DeserializeVerified for Option<T> {
+    const TYPE_HASH: u64 = combine_type_hashes(type_hash("Option"), T::TYPE_HASH);
+}
+
 impl<T: Serialize + Sync> Serialize for Vec<T> {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
         let mut total = (self.len() as u64).serialize(&mut w).await?;
@@ -156,11 +249,21 @@ impl<T: Deserialize + Send> Deserialize for Vec<T> {
     async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
         let len = u64::deserialize(&mut r).await? as usize;
         let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            out.push(T::deserialize(&mut r).await?);
+        let mut i = 0;
+        while i < len {
+            out.insert(i, T::deserialize(&mut r).await?);
+            i += 1;
         }
         Ok(out)
     }
+}
+
+impl<T: SerializeVerified> SerializeVerified for Vec<T> {
+    const TYPE_HASH: u64 = combine_type_hashes(type_hash("Vec"), T::TYPE_HASH);
+}
+
+impl<T: DeserializeVerified + Send> DeserializeVerified for Vec<T> {
+    const TYPE_HASH: u64 = combine_type_hashes(type_hash("Vec"), T::TYPE_HASH);
 }
 
 impl<T: Serialize + std::fmt::Debug + Sync, E: Serialize + std::fmt::Debug + Sync> Serialize for Result<T, E> {
@@ -186,6 +289,14 @@ impl<T: Deserialize + std::fmt::Debug, E: Deserialize + std::fmt::Debug> Deseria
     }
 }
 
+
+impl<T: SerializeVerified + std::fmt::Debug, E: SerializeVerified + std::fmt::Debug> SerializeVerified for Result<T, E> {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("Result"), T::TYPE_HASH), E::TYPE_HASH);
+}
+
+impl<T: DeserializeVerified + std::fmt::Debug, E: DeserializeVerified + std::fmt::Debug> DeserializeVerified for Result<T, E> {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("Result"), T::TYPE_HASH), E::TYPE_HASH);
+}
 
 impl Serialize for PathBuf {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
@@ -265,6 +376,16 @@ where T: Deserialize + Sync + Sized + Send
     }
 }
 
+#[cfg(feature = "generic_array_parse")]
+impl<T: SerializeVerified, const L: usize> SerializeVerified for [T; L] {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("array"), L as u64), T::TYPE_HASH);
+}
+
+#[cfg(feature = "generic_array_parse")]
+impl<T: DeserializeVerified + Sync + Send, const L: usize> DeserializeVerified for [T; L] {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("array"), L as u64), T::TYPE_HASH);
+}
+
 impl<K: Serialize + Sync, V: Serialize + Sync> Serialize for HashMap<K, V> {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
         let mut total = (self.len() as u64).serialize(&mut w).await?;
@@ -285,4 +406,12 @@ impl<K: Deserialize + std::hash::Hash + std::cmp::Eq + Send, V: Deserialize + Se
         }
         Ok(hashmap)
     }
+}
+
+impl<K: SerializeVerified, V: SerializeVerified> SerializeVerified for HashMap<K, V> {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("HashMap"), K::TYPE_HASH), V::TYPE_HASH);
+}
+
+impl<K: DeserializeVerified + std::hash::Hash + std::cmp::Eq + Send, V: DeserializeVerified + Send> DeserializeVerified for HashMap<K, V> {
+    const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("HashMap"), K::TYPE_HASH), V::TYPE_HASH);
 }
