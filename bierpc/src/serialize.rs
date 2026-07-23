@@ -179,7 +179,8 @@ impl Deserialize for bool {
 impl Serialize for String {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
         let bytes = self.as_bytes();
-        let len = bytes.len() as u32;
+        let len = u16::try_from(bytes.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "String longer than u16::MAX bytes"))?;
 
         // Note the &mut w passed here. Since W is Unpin, &mut W implements AsyncWrite.
         let mut written = len.serialize(&mut w).await?;
@@ -192,7 +193,7 @@ impl Serialize for String {
 
 impl Deserialize for String {
     async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
-        let len = u32::deserialize(&mut r).await? as usize;
+        let len = u16::deserialize(&mut r).await? as usize;
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf).await?;
 
@@ -245,14 +246,13 @@ impl<T: Serialize + Sync> Serialize for Vec<T> {
     }
 }
 
-impl<T: Deserialize + Send> Deserialize for Vec<T> {
+impl<T: Deserialize + Send> Deserialize for Vec<T>
+{
     async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
         let len = u64::deserialize(&mut r).await? as usize;
-        let mut out = Vec::with_capacity(len);
-        let mut i = 0;
-        while i < len {
-            out.insert(i, T::deserialize(&mut r).await?);
-            i += 1;
+        let mut out = Vec::with_capacity(len.min(4096 / size_of::<T>().max(1)));
+        for _ in 0..len {
+            out.push(T::deserialize(&mut r).await?);
         }
         Ok(out)
     }
@@ -400,7 +400,7 @@ impl<K: Serialize + Sync, V: Serialize + Sync> Serialize for HashMap<K, V> {
 impl<K: Deserialize + std::hash::Hash + std::cmp::Eq + Send, V: Deserialize + Send> Deserialize for HashMap<K, V> {
     async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
         let len = u64::deserialize(&mut r).await?;
-        let mut hashmap = HashMap::with_capacity(len as usize);
+        let mut hashmap = HashMap::with_capacity(len.min((4096 / (size_of::<K>() + size_of::<V>()).max(1)) as u64) as usize);
         for _ in 0..len {
             hashmap.insert(K::deserialize(&mut r).await?, V::deserialize(&mut r).await?);
         }
@@ -414,4 +414,38 @@ impl<K: SerializeVerified, V: SerializeVerified> SerializeVerified for HashMap<K
 
 impl<K: DeserializeVerified + std::hash::Hash + std::cmp::Eq + Send, V: DeserializeVerified + Send> DeserializeVerified for HashMap<K, V> {
     const TYPE_HASH: u64 = combine_type_hashes(combine_type_hashes(type_hash("HashMap"), K::TYPE_HASH), V::TYPE_HASH);
+}
+
+pub struct Bounded<T, const MAX_BYTES: u64>(pub T);
+
+impl<T: Serialize + Sync, const MAX_BYTES: u64> Serialize for Bounded<T, MAX_BYTES> {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
+        self.0.serialize(w).await
+    }
+}
+
+impl<T: Deserialize, const MAX_BYTES: u64> Deserialize for Bounded<T, MAX_BYTES> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> io::Result<Self> {
+        let mut limited = r.take(MAX_BYTES);
+        match T::deserialize(&mut limited).await {
+            Ok(v) => Ok(Bounded(v)),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof && limited.limit() == 0 => {
+                Err(io::Error::new(ErrorKind::InvalidData, "byte limit exceeded"))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl<T: SerializeVerified, const MAX_BYTES: u64> SerializeVerified for Bounded<T, MAX_BYTES> {
+    const TYPE_HASH: u64 = T::TYPE_HASH;
+}
+
+impl<T: DeserializeVerified, const MAX_BYTES: u64> DeserializeVerified for Bounded<T, MAX_BYTES> {
+    const TYPE_HASH: u64 = T::TYPE_HASH;
+}
+
+impl<T, const MAX_BYTES: u64> std::ops::Deref for Bounded<T, MAX_BYTES> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.0 }
 }
