@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout, Sleep};
 use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
@@ -46,8 +46,8 @@ pub enum MaybeTlsStream<T> {
     Tls(T),
 }
 
-pub type ClientStream = MaybeTlsStream<ClientTlsStream<TcpStream>>;
-pub type ServerStream = MaybeTlsStream<ServerTlsStream<TcpStream>>;
+pub type ClientStream = TimedStream<MaybeTlsStream<ClientTlsStream<TcpStream>>>;
+pub type ServerStream = TimedStream<MaybeTlsStream<ServerTlsStream<TcpStream>>>;
 
 impl<T: AsyncRead + Unpin> AsyncRead for MaybeTlsStream<T> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
@@ -81,6 +81,82 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<T> {
     }
 }
 
+pub struct TimedStream<S> {
+    inner: S,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+    read_deadline: Option<Pin<Box<Sleep>>>,
+    write_deadline: Option<Pin<Box<Sleep>>>,
+}
+
+impl<S> TimedStream<S> {
+    pub fn new(inner: S, read_timeout: Option<Duration>, write_timeout: Option<Duration>) -> Self {
+        Self {
+            inner,
+            read_timeout,
+            write_timeout,
+            read_deadline: None,
+            write_deadline: None,
+        }
+    }
+}
+
+fn poll_with_deadline<T>(
+    poll: Poll<io::Result<T>>,
+    limit: Option<Duration>,
+    deadline: &mut Option<Pin<Box<Sleep>>>,
+    cx: &mut Context<'_>,
+    phase: &'static str,
+) -> Poll<io::Result<T>> {
+    match poll {
+        Poll::Ready(result) => {
+            *deadline = None;
+            Poll::Ready(result)
+        }
+        Poll::Pending => {
+            if let Some(limit) = limit {
+                let sleep = deadline.get_or_insert_with(|| Box::pin(sleep(limit)));
+                if sleep.as_mut().poll(cx).is_ready() {
+                    *deadline = None;
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("{phase} timed out after {limit:?}"),
+                    )));
+                }
+            }
+            Poll::Pending
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TimedStream<S> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_read(cx, buf);
+        poll_with_deadline(poll, this.read_timeout, &mut this.read_deadline, cx, "read")
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TimedStream<S> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_write(cx, buf);
+        poll_with_deadline(poll, this.write_timeout, &mut this.write_deadline, cx, "write")
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_flush(cx);
+        poll_with_deadline(poll, this.write_timeout, &mut this.write_deadline, cx, "flush")
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_shutdown(cx);
+        poll_with_deadline(poll, this.write_timeout, &mut this.write_deadline, cx, "shutdown")
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientTlsConfig {
     pub config: Arc<TlsClientConfig>,
@@ -102,6 +178,8 @@ pub struct ClientConfig {
     pub connect_timeout: Duration,
     pub tls_handshake_timeout: Duration,
     pub call_timeout: Option<Duration>,
+    pub read_timeout: Option<Duration>,
+    pub write_timeout: Option<Duration>,
     pub tls: Option<ClientTlsConfig>,
 }
 
@@ -112,6 +190,8 @@ impl Default for ClientConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
             call_timeout: None,
+            read_timeout: None,
+            write_timeout: None,
             tls: None,
         }
     }
@@ -124,6 +204,8 @@ pub struct ServerConfig {
     pub idle_timeout: Duration,
     pub tls_handshake_timeout: Duration,
     pub request_timeout: Option<Duration>,
+    pub read_timeout: Option<Duration>,
+    pub write_timeout: Option<Duration>,
     pub tls: Option<Arc<TlsServerConfig>>,
 }
 
@@ -135,6 +217,8 @@ impl Default for ServerConfig {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
             request_timeout: None,
+            read_timeout: None,
+            write_timeout: None,
             tls: None,
         }
     }
@@ -291,7 +375,7 @@ async fn establish(target: SocketAddr, config: &ClientConfig) -> RpcResult<BufSt
         }
         None => MaybeTlsStream::Plain(stream),
     };
-    Ok(BufStream::new(stream))
+    Ok(BufStream::new(TimedStream::new(stream, config.read_timeout, config.write_timeout)))
 }
 
 pub trait RpcServerHandler: Send + Sync + 'static {
@@ -434,6 +518,8 @@ impl<Sh: RpcServerHandler, Psh: PersistentRpcServerHandler> RpcServer<Sh, Psh> {
             let max_message_bytes = self.config.max_message_bytes;
             let idle_timeout = self.config.idle_timeout;
             let request_timeout = self.config.request_timeout;
+            let read_timeout = self.config.read_timeout;
+            let write_timeout = self.config.write_timeout;
             let tls = self.config.tls.clone();
             let tls_handshake_timeout = self.config.tls_handshake_timeout;
 
@@ -451,6 +537,7 @@ impl<Sh: RpcServerHandler, Psh: PersistentRpcServerHandler> RpcServer<Sh, Psh> {
                     }
                     None => MaybeTlsStream::Plain(stream),
                 };
+                let stream = TimedStream::new(stream, read_timeout, write_timeout);
                 Self::incoming_handle(handler, persistence_handler, stream, max_message_bytes, idle_timeout, request_timeout).await;
             });
         }
