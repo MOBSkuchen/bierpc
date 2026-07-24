@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[cfg(feature = "generic_array_parse")]
@@ -109,7 +110,7 @@ macro_rules! impl_verified {
     };
 }
 
-impl_verified!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool, String, PathBuf, SocketAddr);
+impl_verified!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool, String, PathBuf, SocketAddr, char, Duration, SystemTime, IpAddr, Ipv4Addr, Ipv6Addr);
 
 macro_rules! impl_tuples {
     ( $( $name:ident )+ ) => {
@@ -339,6 +340,234 @@ impl Deserialize for SocketAddr {
         };
         Ok(SocketAddr::new(ip, port))
     }
+}
+
+impl Serialize for Ipv4Addr {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
+        self.to_bits().serialize(w).await
+    }
+}
+
+impl Deserialize for Ipv4Addr {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> io::Result<Self> {
+        Ok(Ipv4Addr::from_bits(u32::deserialize(r).await?))
+    }
+}
+
+impl Serialize for Ipv6Addr {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
+        self.to_bits().serialize(w).await
+    }
+}
+
+impl Deserialize for Ipv6Addr {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> io::Result<Self> {
+        Ok(Ipv6Addr::from_bits(u128::deserialize(r).await?))
+    }
+}
+
+impl Serialize for IpAddr {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut t = self.is_ipv4().serialize(&mut w).await?;
+        t += match self {
+            IpAddr::V4(ip) => ip.serialize(&mut w).await?,
+            IpAddr::V6(ip) => ip.serialize(&mut w).await?,
+        };
+        Ok(t)
+    }
+}
+
+impl Deserialize for IpAddr {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        if bool::deserialize(&mut r).await? {
+            Ok(IpAddr::V4(Ipv4Addr::deserialize(&mut r).await?))
+        } else {
+            Ok(IpAddr::V6(Ipv6Addr::deserialize(&mut r).await?))
+        }
+    }
+}
+
+impl Serialize for Duration {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut t = self.as_secs().serialize(&mut w).await?;
+        t += self.subsec_nanos().serialize(&mut w).await?;
+        Ok(t)
+    }
+}
+
+impl Deserialize for Duration {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let secs = u64::deserialize(&mut r).await?;
+        let nanos = u32::deserialize(&mut r).await?;
+        if nanos >= 1_000_000_000 {
+            return Err(io::Error::new(ErrorKind::InvalidData, "Duration nanos out of range"));
+        }
+        Ok(Duration::new(secs, nanos))
+    }
+}
+
+impl Serialize for SystemTime {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let (after_epoch, offset) = match self.duration_since(UNIX_EPOCH) {
+            Ok(d) => (true, d),
+            Err(e) => (false, e.duration()),
+        };
+        let mut t = after_epoch.serialize(&mut w).await?;
+        t += offset.serialize(&mut w).await?;
+        Ok(t)
+    }
+}
+
+impl Deserialize for SystemTime {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let after_epoch = bool::deserialize(&mut r).await?;
+        let offset = Duration::deserialize(&mut r).await?;
+        let time = if after_epoch {
+            UNIX_EPOCH.checked_add(offset)
+        } else {
+            UNIX_EPOCH.checked_sub(offset)
+        };
+        time.ok_or(io::Error::new(ErrorKind::InvalidData, "SystemTime out of range"))
+    }
+}
+
+impl Serialize for char {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
+        (*self as u32).serialize(w).await
+    }
+}
+
+impl Deserialize for char {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> io::Result<Self> {
+        char::from_u32(u32::deserialize(r).await?)
+            .ok_or(io::Error::new(ErrorKind::InvalidData, "Invalid char code point"))
+    }
+}
+
+impl Serialize for () {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, _w: W) -> io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Deserialize for () {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(_r: R) -> io::Result<Self> {
+        Ok(())
+    }
+}
+
+impl SerializeVerified for () {
+    const TYPE_HASH: u64 = type_hash("()");
+}
+
+impl DeserializeVerified for () {
+    const TYPE_HASH: u64 = type_hash("()");
+}
+
+impl<T: Serialize + Sync> Serialize for Box<T> {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, w: W) -> io::Result<usize> {
+        (**self).serialize(w).await
+    }
+}
+
+impl<T: Deserialize + Send> Deserialize for Box<T> {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(r: R) -> io::Result<Self> {
+        Ok(Box::new(T::deserialize(r).await?))
+    }
+}
+
+impl<T: SerializeVerified> SerializeVerified for Box<T> {
+    const TYPE_HASH: u64 = T::TYPE_HASH;
+}
+
+impl<T: DeserializeVerified + Send> DeserializeVerified for Box<T> {
+    const TYPE_HASH: u64 = T::TYPE_HASH;
+}
+
+// Tags are part of the wire format: existing numbers must never change, new
+// kinds get appended. Kinds not in this list serialize as 0 (Other).
+macro_rules! error_kind_map {
+    ($($tag:literal => $kind:ident),* $(,)?) => {
+        const fn error_kind_to_tag(kind: ErrorKind) -> u8 {
+            match kind {
+                $(ErrorKind::$kind => $tag,)*
+                _ => 0,
+            }
+        }
+
+        const fn tag_to_error_kind(tag: u8) -> ErrorKind {
+            match tag {
+                $($tag => ErrorKind::$kind,)*
+                _ => ErrorKind::Other,
+            }
+        }
+    };
+}
+
+error_kind_map! {
+    0 => Other,
+    1 => NotFound,
+    2 => PermissionDenied,
+    3 => ConnectionRefused,
+    4 => ConnectionReset,
+    5 => ConnectionAborted,
+    6 => NotConnected,
+    7 => AddrInUse,
+    8 => AddrNotAvailable,
+    9 => BrokenPipe,
+    10 => AlreadyExists,
+    11 => WouldBlock,
+    12 => InvalidInput,
+    13 => InvalidData,
+    14 => TimedOut,
+    15 => WriteZero,
+    16 => Interrupted,
+    17 => Unsupported,
+    18 => UnexpectedEof,
+    19 => OutOfMemory,
+    20 => HostUnreachable,
+    21 => NetworkUnreachable,
+    22 => NetworkDown,
+    23 => NotADirectory,
+    24 => IsADirectory,
+    25 => DirectoryNotEmpty,
+    26 => ReadOnlyFilesystem,
+    27 => NotSeekable,
+    28 => StorageFull,
+    29 => FileTooLarge,
+    30 => ResourceBusy,
+    31 => ExecutableFileBusy,
+    32 => Deadlock,
+    33 => TooManyLinks,
+    34 => ArgumentListTooLong,
+    35 => StaleNetworkFileHandle,
+    36 => QuotaExceeded,
+    37 => CrossesDevices,
+    38 => InvalidFilename,
+}
+
+impl Serialize for io::Error {
+    async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
+        let mut total = error_kind_to_tag(self.kind()).serialize(&mut w).await?;
+        total += self.to_string().serialize(&mut w).await?;
+        Ok(total)
+    }
+}
+
+impl Deserialize for io::Error {
+    async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
+        let kind = tag_to_error_kind(u8::deserialize(&mut r).await?);
+        let message = String::deserialize(&mut r).await?;
+        Ok(io::Error::new(kind, message))
+    }
+}
+
+impl SerializeVerified for io::Error {
+    const TYPE_HASH: u64 = type_hash("io::Error");
+}
+
+impl DeserializeVerified for io::Error {
+    const TYPE_HASH: u64 = type_hash("io::Error");
 }
 
 #[cfg(feature = "generic_array_parse")]
