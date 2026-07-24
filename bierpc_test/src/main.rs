@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{sleep, Duration};
 use bierpc::serialize::{Serialize, Deserialize, SerializeVerified, DeserializeVerified};
-use bierpc::{RpcClient, RpcServer, RpcServerHandler, Target};
+use bierpc::{PersistentRpcServerHandler, RpcClient, RpcServer, RpcServerHandler, ServerConfig, Target};
 use bierpc::error::RpcResult;
 use bier_derive::{Serialize, Deserialize, SerializeVerified, DeserializeVerified};
 
@@ -43,13 +44,31 @@ impl MyHandler {
     }
 }
 
-impl RpcServerHandler<Action, MyDummyResult> for MyHandler {
+impl RpcServerHandler for MyHandler {
+    type Action = Action;
+    type Response = MyDummyResult;
+
     async fn handle(&self, action: Action) -> RpcResult<MyDummyResult> {
         match action {
             Action::CreateUser { id, name } => self.create_user(id, name),
             Action::DeleteUser(id) => self.delete_user(id),
             Action::DeleteUser2(id) => self.delete_user(u64::from_le_bytes(id))
         }
+    }
+}
+
+struct SumHandler;
+
+impl PersistentRpcServerHandler for SumHandler {
+    type Action = u64;
+    type Response = u64;
+
+    async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send>(&self, count: u64, s: &mut S) -> RpcResult<u64> {
+        let mut sum = 0u64;
+        for _ in 0..count {
+            sum += u64::deserialize(&mut *s).await?;
+        }
+        Ok(sum)
     }
 }
 
@@ -61,23 +80,23 @@ async fn main() {
     let server_target = target.clone();
 
     tokio::spawn(async move {
-        let handler = MyHandler::new();
-        let server = RpcServer::<Action, MyDummyResult, _>::new(server_target.into(), handler)
+        let server = RpcServer::new(server_target.into(), MyHandler::new())
             .await
-            .expect("Failed to bind server");
+            .expect("Failed to bind server")
+            .with_persistence(SumHandler)
+            .with_config(ServerConfig { max_connections: 4, ..Default::default() });
 
-        server.run(4).await;
+        server.run().await;
     });
 
     sleep(Duration::from_millis(100)).await;
 
     println!("[Client] Connecting...");
-    let mut client = RpcClient::<Action>::new(target.into())
+    let mut client = RpcClient::<Action, u64>::new(target.into())
         .await
         .expect("Failed to create client");
 
-    let input = Action::DeleteUser2([0u8; 8]);
-    let input = Action::CreateUser {id: 1, name: "Hi!".to_string()};
+    let input = Action::CreateUser { id: 1, name: "Hi!".to_string() };
     println!("[Client] Sending: \"{:?}\"", input);
 
     match client.call::<MyDummyResult>(input).await {
@@ -88,6 +107,23 @@ async fn main() {
         Err(e) => {
             println!("[Test] FAILED: {:?}", e);
         }
+    }
+
+    match client.call_persistent::<u64, _>(3, async |s| {
+        for n in [1u64, 2, 3] {
+            n.serialize(&mut *s).await?;
+        }
+        Ok(())
+    }).await {
+        Ok(sum) => println!("[Persistent] Sum: {} (expected 6)", sum),
+        Err(e) => println!("[Persistent] FAILED: {:?}", e),
+    }
+
+    let follow_up = Action::DeleteUser(1);
+    println!("[Client] Sending follow-up on same connection: \"{:?}\"", follow_up);
+    match client.call::<MyDummyResult>(follow_up).await {
+        Ok(response) => println!("[Client] Received: \"{:?}\"", response),
+        Err(e) => println!("[Test] FAILED: {:?}", e),
     }
 
     let (mut tx, mut rx) = tokio::io::duplex(1024);
