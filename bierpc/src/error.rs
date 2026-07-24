@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 use crate::serialize::{Serialize, Deserialize};
 use bier_derive::{Deserialize, Serialize};
 
@@ -11,7 +12,11 @@ pub enum RpcError {
     CallTypeRejected {
         reason: String
     },
-    ConnectionPoisoned
+    ConnectionPoisoned,
+    TimedOut {
+        phase: String,
+        after: Duration
+    }
 }
 
 impl From<io::Error> for RpcError {
