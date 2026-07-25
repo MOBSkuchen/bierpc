@@ -1,7 +1,13 @@
+use std::error::Error;
+use std::fmt::{write, Display, Formatter};
+use crate::serialize::DeserializeVerified;
+use crate::serialize::SerializeVerified;
 use std::io;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::num::ParseIntError;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -14,6 +20,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use bier_derive::{Deserialize, DeserializeVerified, Serialize, SerializeVerified};
 use crate::error::{RpcError, RpcResult};
 use crate::serialize::{Deserialize, Serialize};
 
@@ -22,21 +29,72 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialOrd, PartialEq, Debug, Serialize, Deserialize, SerializeVerified, DeserializeVerified)]
 pub struct Target {
     pub port: u16,
-    pub addr: String
+    pub addr: Ipv4Addr
 }
 
 impl Target {
-    pub fn to_socket_addr(&self) -> Option<SocketAddr> {
-        self.addr.parse().ok().map(|t| {SocketAddr::new(t, self.port)})
+    pub fn to_socket_addr(&self) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(self.addr, self.port))
     }
 
-    pub fn new(addr: String, port: u16) -> Self {
+    pub fn new(addr: Ipv4Addr, port: u16) -> Self {
         Self {
             addr,
             port
+        }
+    }
+}
+
+impl Into<SocketAddr> for Target {
+    fn into(self) -> SocketAddr {
+        self.to_socket_addr()
+    }
+}
+
+impl Display for Target {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.addr, self.port)
+    }
+}
+
+#[derive(Debug)]
+pub enum TargetParseError {
+    PortParseErr(ParseIntError),
+    ParseAddrErr,
+    NoPortErr
+}
+
+impl Display for TargetParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TargetParseError::PortParseErr(ppe) => write!(f, "failed to parse port: {}", ppe),
+            TargetParseError::ParseAddrErr => write!(f, "failed to parse addr"),
+            TargetParseError::NoPortErr => write!(f, "no port was specified. ':' not present")
+        }
+    }
+}
+
+impl Error for TargetParseError {
+    
+}
+
+impl FromStr for Target
+{
+    type Err = TargetParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((ip, port)) = s.split_once(":") {
+            let port = u16::from_str(port).map_err(|e| {TargetParseError::PortParseErr(e)})?;
+            let addr = Ipv4Addr::from_str(ip).map_err(|_e| {TargetParseError::ParseAddrErr})?;
+            Ok(Self {
+                addr,
+                port
+            })
+        } else {
+            Err(TargetParseError::NoPortErr)
         }
     }
 }

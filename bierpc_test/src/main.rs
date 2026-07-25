@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{sleep, Duration};
@@ -74,13 +75,12 @@ impl PersistentRpcServerHandler for SumHandler {
 
 #[tokio::main]
 async fn main() {
-    let port = 8080;
-    let target = Target::new("127.0.0.1".to_string(), port);
+    let target = Target::from_str("127.0.0.1:5000").unwrap();
 
     let server_target = target.clone();
 
     tokio::spawn(async move {
-        let server = RpcServer::new(server_target.to_socket_addr().unwrap(), MyHandler::new())
+        let server = RpcServer::new(server_target.to_socket_addr(), MyHandler::new())
             .await
             .expect("Failed to bind server")
             .with_persistence(SumHandler)
@@ -92,7 +92,7 @@ async fn main() {
     sleep(Duration::from_millis(100)).await;
 
     println!("[Client] Connecting...");
-    let mut client = RpcClient::<Action, u64>::new(target.to_socket_addr().unwrap())
+    let mut client = RpcClient::<Action, u64>::new(target.to_socket_addr())
         .await
         .expect("Failed to create client");
 
