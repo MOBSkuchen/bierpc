@@ -1,6 +1,6 @@
 [package]
 name = "bierpc"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [features]
@@ -8,6 +8,6 @@ default = ["generic_array_parse"]
 generic_array_parse = []
 
 [dependencies]
-bier_derive = {path = "../bier_derive" }
+bier_derive = { version = "1.0.0", git = "https://github.com/MOBSkuchen/bierpc" }
 tokio = { version =  "1.49.0", features = ["full"] }
 tokio-rustls = { version = "0.26.4" }
