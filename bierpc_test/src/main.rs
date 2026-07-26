@@ -77,10 +77,8 @@ impl PersistentRpcServerHandler for SumHandler {
 async fn main() {
     let target = Target::from_str("127.0.0.1:5000").unwrap();
 
-    let server_target = target.clone();
-
     tokio::spawn(async move {
-        let server = RpcServer::new(server_target.to_socket_addr(), MyHandler::new())
+        let server = RpcServer::new(target.to_socket_addr(), MyHandler::new())
             .await
             .expect("Failed to bind server")
             .with_persistence(SumHandler)
