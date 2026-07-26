@@ -114,6 +114,7 @@ impl_verified!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f
 
 macro_rules! impl_tuples {
     ( $( $name:ident )+ ) => {
+        #[allow(non_camel_case_types)]
         impl<$($name: Sync + Send + Serialize),+> Serialize for ($($name,)+) {
             async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
                 let ($($name,)+) = self;
@@ -127,7 +128,7 @@ macro_rules! impl_tuples {
                 Ok(total_bytes)
             }
         }
-
+        #[allow(non_camel_case_types)]
         impl<$($name: Sync + Send + Deserialize),+> Deserialize for ($($name,)+) {
             async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
                 Ok((
@@ -137,7 +138,7 @@ macro_rules! impl_tuples {
                 ))
             }
         }
-
+        #[allow(non_camel_case_types)]
         impl<$($name: SerializeVerified + Send),+> SerializeVerified for ($($name,)+) {
             const TYPE_HASH: u64 = {
                 let mut hash = type_hash("tuple");
@@ -145,7 +146,7 @@ macro_rules! impl_tuples {
                 hash
             };
         }
-
+        #[allow(non_camel_case_types)]
         impl<$($name: DeserializeVerified + Sync + Send),+> DeserializeVerified for ($($name,)+) {
             const TYPE_HASH: u64 = {
                 let mut hash = type_hash("tuple");
@@ -172,7 +173,7 @@ impl Deserialize for bool {
         match val {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid bool value")),
+            _ => Err(io::Error::new(ErrorKind::InvalidData, "Invalid bool value")),
         }
     }
 }
@@ -181,7 +182,7 @@ impl Serialize for String {
     async fn serialize<W: AsyncWrite + Unpin + Send>(&self, mut w: W) -> io::Result<usize> {
         let bytes = self.as_bytes();
         let len = u16::try_from(bytes.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "String longer than u16::MAX bytes"))?;
+            .map_err(|_| io::Error::new(ErrorKind::InvalidData, "String longer than u16::MAX bytes"))?;
 
         // Note the &mut w passed here. Since W is Unpin, &mut W implements AsyncWrite.
         let mut written = len.serialize(&mut w).await?;
@@ -199,7 +200,7 @@ impl Deserialize for String {
         r.read_exact(&mut buf).await?;
 
         String::from_utf8(buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))
     }
 }
 
@@ -224,7 +225,7 @@ impl<T: Deserialize> Deserialize for Option<T> {
         match tag {
             0 => Ok(None),
             1 => Ok(Some(T::deserialize(r).await?)),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid Option tag")),
+            _ => Err(io::Error::new(ErrorKind::InvalidData, "Invalid Option tag")),
         }
     }
 }
@@ -309,7 +310,7 @@ impl Serialize for PathBuf {
 impl Deserialize for PathBuf {
     async fn deserialize<R: AsyncRead + Unpin + Send>(mut r: R) -> io::Result<Self> {
         let s = String::deserialize(&mut r).await?;
-        PathBuf::from_str(s.as_str()).map_err(|e| {io::Error::new(ErrorKind::InvalidData, "Could not convert bare string to PathBuf")})
+        PathBuf::from_str(s.as_str()).map_err(|_| {io::Error::new(ErrorKind::InvalidData, "Could not convert bare string to PathBuf")})
     }
 }
 

@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fmt::{write, Display, Formatter};
+use std::fmt::{Display, Formatter};
 use crate::serialize::DeserializeVerified;
 use crate::serialize::SerializeVerified;
 use std::io;
