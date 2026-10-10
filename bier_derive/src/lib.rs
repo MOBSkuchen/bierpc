@@ -146,7 +146,7 @@ pub fn derive_deserialize(input: TokenStream) -> TokenStream {
                             let name = field.ident.clone().unwrap();
                             v.push(
                                 quote!(
-                                    #name : #ty::deserialize(&mut r).await?
+                                    #name : <#ty>::deserialize(&mut r).await?
                                 )
                             );
                         }
