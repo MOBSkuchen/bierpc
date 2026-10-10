@@ -1,5 +1,5 @@
 [package]
-name = "parc_test"
+name = "bierpc_test"
 version = "0.1.0"
 edition = "2024"
 

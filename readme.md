@@ -11,21 +11,28 @@ To create a new instance use:
 
 ```rust
 // Target TCP addr: localhost:8000
-let target = Target::new("localhost", 8000);
-// handler is our struct that implements RpcServerHandler; look below
-let instance = RpcServer::<Action, Return, _>::new(target, handler);
+let target = Target::from_str("127.0.0.1:5000").unwrap();
+// MyHanlder is our struct that implements RpcServerHandler; look below
+// SumHandler implements persistent request handling
+let server = RpcServer::new(target.to_socket_addr(), MyHandler::new())
+    .await.expect("Failed to bind server")
+    .with_persistence(SumHandler)
+    .with_config(ServerConfig { max_connections: 4, ..Default::default() });
 ```
 
-We must also create a Handler struct, that implements RpcServerHandler.
+We must also create a Handler struct, that implements `RpcServerHandler`.
 Its method ``handle`` is called upon every call and, well, handles action and returns *something*
 
 ```rust
-impl RpcServerHandler<Action, Return> for MyHandler {
-    fn handle(&self, action: Action) -> RpcResult<Return> {
+impl RpcServerHandler for MyHandler {
+    type Action = Action;
+    type Response = MyDummyResult;
+
+    async fn handle(&self, action: Action) -> RpcResult<MyDummyResult> {
         match action {
-            // Example for an actions:
-            Action::CreateUser(id, name) => {self.create_user(id, name)}
-            Action::DeleteUser(id) => {self.delete_user(id)}
+            Action::CreateUser { id, name } => self.create_user(id, name),
+            Action::DeleteUser(id) => self.delete_user(id),
+            Action::DeleteUser2(id) => self.delete_user(u64::from_le_bytes(id))
         }
     }
 }
