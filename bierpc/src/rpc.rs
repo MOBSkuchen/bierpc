@@ -434,6 +434,11 @@ impl<Sh: RpcServerHandler, Psh: PersistentRpcServerHandler> RpcServer<Sh, Psh> {
         }
     }
 
+    /// The address the listener is actually bound to (resolves port 0 to the OS-assigned port).
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
     pub fn with_config(mut self, config: ServerConfig) -> Self {
         self.config = config;
         self
