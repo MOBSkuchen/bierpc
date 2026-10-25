@@ -2,7 +2,6 @@
 stands for **Bi**nary **E**ncoder and **R**emote **P**rocedure **C**aller, where the *Bi* doubles for meaning *two-way*, as **bierpc** supports client and server usage.
 
 This repo includes *bierpc*, which is the main library including serialization and rpc logic and the *bier_derive* library, which can derive the Serialize and Deserialize trait for structs and enums.
-It also includes an example in *bierpc_test*.
 
 ## Usage
 The bierpc crate provides ``RpcServer`` struct, which takes an *Action* and *Return* type.
