@@ -631,3 +631,17 @@ async fn with_timeout_opt<T>(
         None => fut.await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_parse() {
+        let target = Target::from_str("127.0.0.1:5000").unwrap();
+        assert_eq!(target.to_socket_addr(), SocketAddr::from_str("127.0.0.1:5000").unwrap());
+        assert!(matches!(Target::from_str("127.0.0.1"), Err(TargetParseError::NoPortErr)));
+        assert!(matches!(Target::from_str("127.0.0.1:abc"), Err(TargetParseError::PortParseErr(_))));
+        assert!(matches!(Target::from_str("nope:5000"), Err(TargetParseError::ParseAddrErr)));
+    }
+}

@@ -679,3 +679,73 @@ impl<T, const MAX_BYTES: u64> std::ops::Deref for Bounded<T, MAX_BYTES> {
     type Target = T;
     fn deref(&self) -> &T { &self.0 }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn roundtrip<T: Serialize + Deserialize + Sync>(value: &T) -> T {
+        let mut buf = Vec::new();
+        value.serialize(&mut buf).await.expect("Failed to serialize");
+        T::deserialize(&buf[..]).await.expect("Failed to deserialize")
+    }
+
+    #[tokio::test]
+    async fn roundtrip_primitives() {
+        assert_eq!(roundtrip(&42u64).await, 42);
+        assert_eq!(roundtrip(&-7i32).await, -7);
+        assert_eq!(roundtrip(&1.5f64).await, 1.5);
+        assert_eq!(roundtrip(&true).await, true);
+        assert_eq!(roundtrip(&'ß').await, 'ß');
+        assert_eq!(roundtrip(&"Hi!".to_string()).await, "Hi!");
+    }
+
+    #[tokio::test]
+    async fn roundtrip_containers() {
+        assert_eq!(roundtrip(&Some(5u8)).await, Some(5));
+        assert_eq!(roundtrip(&None::<u8>).await, None);
+        assert_eq!(roundtrip(&vec![1u16, 2, 3]).await, vec![1, 2, 3]);
+        assert_eq!(roundtrip(&(1u8, "a".to_string())).await, (1, "a".to_string()));
+        assert_eq!(roundtrip(&Ok::<u32, String>(1)).await, Ok(1));
+        assert_eq!(roundtrip(&Err::<u32, String>("no".to_string())).await, Err("no".to_string()));
+
+        let mut map = HashMap::new();
+        map.insert(1u64, "one".to_string());
+        map.insert(2u64, "two".to_string());
+        assert_eq!(roundtrip(&map).await, map);
+    }
+
+    #[cfg(feature = "generic_array_parse")]
+    #[tokio::test]
+    async fn roundtrip_array() {
+        assert_eq!(roundtrip(&[1u8, 2, 3, 4]).await, [1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_std_types() {
+        let addr = SocketAddr::from_str("127.0.0.1:5000").unwrap();
+        assert_eq!(roundtrip(&addr).await, addr);
+        let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_eq!(roundtrip(&ip).await, ip);
+        assert_eq!(roundtrip(&Duration::from_millis(1500)).await, Duration::from_millis(1500));
+        assert_eq!(roundtrip(&PathBuf::from("a/b")).await, PathBuf::from("a/b"));
+    }
+
+    #[tokio::test]
+    async fn verified_hash_mismatch() {
+        let mut buf = Vec::new();
+        7u64.serialize_verified(&mut buf).await.expect("Failed to serialize");
+
+        assert_eq!(u64::deserialize_verified(&buf[..]).await.unwrap(), Some(7));
+        assert!(String::deserialize_verified(&buf[..]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn bounded_rejects_oversized() {
+        let mut buf = Vec::new();
+        "this is too long".to_string().serialize(&mut buf).await.expect("Failed to serialize");
+
+        let err = Bounded::<String, 8>::deserialize(&buf[..]).await.err().expect("Expected limit error");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(Bounded::<String, 64>::deserialize(&buf[..]).await.is_ok());
+    }
+}
